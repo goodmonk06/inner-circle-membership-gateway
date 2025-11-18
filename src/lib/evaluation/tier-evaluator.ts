@@ -1,10 +1,12 @@
 import { prisma } from '../prisma';
 import { ruleEvaluator } from './rule-evaluator';
 import { EvaluationDetail, TierEvaluation, RuleConfig } from '@/types';
+import { eventBus, createEvent, TierChangedEvent, MemberEvaluatedEvent } from '../events';
+import { logger } from '../logger';
 
 /**
  * Tier Evaluator
- * Main engine for evaluating member tier eligibility
+ * Main engine for evaluating member tier eligibility with event emission and history tracking
  */
 export class TierEvaluator {
   /**
@@ -91,11 +93,31 @@ export class TierEvaluator {
     communityId: string,
     context?: Record<string, unknown>
   ) {
+    // Get previous status first
+    const previousStatus = await prisma.memberTierStatus.findUnique({
+      where: {
+        memberId_communityId: {
+          memberId,
+          communityId,
+        },
+      },
+      include: {
+        currentTier: true,
+      },
+    });
+
+    const previousTierId = previousStatus?.currentTierId || null;
+    const previousTierName = previousStatus?.currentTier?.name || null;
+
+    // Evaluate
     const evaluationDetail = await this.evaluateMemberTier(
       memberId,
       communityId,
       context
     );
+
+    const newTierId = evaluationDetail.assignedTier;
+    const newTierName = evaluationDetail.assignedTierName;
 
     // Upsert the member tier status
     const memberStatus = await prisma.memberTierStatus.upsert({
@@ -108,12 +130,12 @@ export class TierEvaluator {
       create: {
         memberId,
         communityId,
-        currentTierId: evaluationDetail.assignedTier,
+        currentTierId: newTierId,
         evaluatedAt: new Date(),
         evaluationDetailJson: evaluationDetail as any,
       },
       update: {
-        currentTierId: evaluationDetail.assignedTier,
+        currentTierId: newTierId,
         evaluatedAt: new Date(),
         evaluationDetailJson: evaluationDetail as any,
       },
@@ -121,6 +143,52 @@ export class TierEvaluator {
         currentTier: true,
       },
     });
+
+    // Emit evaluation event
+    await eventBus.emit(
+      createEvent<MemberEvaluatedEvent>('member.evaluated', {
+        memberId,
+        communityId,
+        tierId: newTierId,
+        tierName: newTierName,
+      })
+    );
+
+    // If tier changed, create history and emit tier changed event
+    if (previousTierId !== newTierId) {
+      logger.info('Tier changed during evaluation', {
+        memberId,
+        communityId,
+        from: previousTierName,
+        to: newTierName,
+      });
+
+      // Create history record
+      await prisma.tierHistory.create({
+        data: {
+          memberId,
+          communityId,
+          fromTierId: previousTierId,
+          toTierId: newTierId,
+          reason: 'Automatic evaluation',
+          triggeredBy: 'system',
+        },
+      });
+
+      // Emit tier changed event
+      await eventBus.emit(
+        createEvent<TierChangedEvent>('tier.changed', {
+          memberId,
+          communityId,
+          fromTierId: previousTierId,
+          toTierId: newTierId,
+          fromTierName: previousTierName,
+          toTierName: newTierName,
+          reason: 'Automatic evaluation',
+          triggeredBy: 'system',
+        })
+      );
+    }
 
     return memberStatus;
   }
