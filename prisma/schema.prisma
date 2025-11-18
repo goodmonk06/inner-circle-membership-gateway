@@ -1,0 +1,88 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Membership tier definition (e.g., VIP, Core, Outer)
+model MembershipTier {
+  id                 String   @id @default(cuid())
+  communityId        String   // Links to community/organization
+  key                String   // Unique key within community (e.g., "vip", "core", "outer")
+  name               String   // Display name
+  descriptionMarkdown String? @db.Text // Rich description of tier benefits
+  priority           Int      // Higher number = more inner circle (e.g., VIP=100, Core=50, Outer=10)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // Relations
+  eligibilityRules   TierEligibilityRule[]
+  memberStatuses     MemberTierStatus[]
+
+  @@unique([communityId, key])
+  @@index([communityId])
+  @@index([priority])
+}
+
+// Rules that determine tier eligibility
+model TierEligibilityRule {
+  id         String   @id @default(cuid())
+  tierId     String
+  tier       MembershipTier @relation(fields: [tierId], references: [id], onDelete: Cascade)
+
+  // Rule type determines how to evaluate
+  // 'reputation' - checks reputation score from oracle
+  // 'currency_balance' - checks token/currency balance
+  // 'manual' - manually assigned by admin
+  // 'custom' - custom logic defined in configJson
+  ruleType   RuleType
+
+  // JSON configuration for the rule
+  // For 'reputation': { "minScore": 100, "category": "trust" }
+  // For 'currency_balance': { "currencyId": "xyz", "minBalance": 1000 }
+  // For 'custom': { "expression": "age > 30 && posts > 10" }
+  configJson Json
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([tierId])
+  @@index([ruleType])
+}
+
+enum RuleType {
+  reputation
+  currency_balance
+  manual
+  custom
+}
+
+// Current tier status for each member
+model MemberTierStatus {
+  id                    String   @id @default(cuid())
+  memberId              String   // Reference to member in auth system
+  communityId           String
+
+  currentTierId         String?  // null if no tier assigned
+  currentTier           MembershipTier? @relation(fields: [currentTierId], references: [id])
+
+  evaluatedAt           DateTime @default(now())
+
+  // Detailed evaluation results
+  // Stores which rules passed/failed and why
+  evaluationDetailJson  Json?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([memberId, communityId])
+  @@index([communityId])
+  @@index([currentTierId])
+  @@index([memberId])
+}
