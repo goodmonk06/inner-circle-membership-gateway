@@ -10,20 +10,58 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Community/Organization that has membership tiers
+model Community {
+  id                  String   @id @default(cuid())
+  key                 String   @unique // Unique key (e.g., "acme-corp")
+  name                String
+  description         String?  @db.Text
+
+  // Settings
+  settingsJson        Json?    // Community-specific settings
+
+  // Auto re-evaluation settings
+  autoReEvalEnabled   Boolean  @default(false)
+  autoReEvalIntervalDays Int?  // How often to auto re-evaluate members
+
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  tiers               MembershipTier[]
+  memberStatuses      MemberTierStatus[]
+  applications        MembershipApplication[]
+  activities          MemberActivity[]
+  webhooks            Webhook[]
+
+  @@index([key])
+}
+
 // Membership tier definition (e.g., VIP, Core, Outer)
 model MembershipTier {
   id                 String   @id @default(cuid())
-  communityId        String   // Links to community/organization
+  communityId        String
+  community          Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
   key                String   // Unique key within community (e.g., "vip", "core", "outer")
   name               String   // Display name
   descriptionMarkdown String? @db.Text // Rich description of tier benefits
   priority           Int      // Higher number = more inner circle (e.g., VIP=100, Core=50, Outer=10)
+
+  // Metadata
+  color              String?  // UI color hex code
+  icon               String?  // Icon identifier
+  maxMembers         Int?     // Optional capacity limit
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   // Relations
   eligibilityRules   TierEligibilityRule[]
   memberStatuses     MemberTierStatus[]
+  benefits           TierBenefit[]
+  applications       MembershipApplication[]
+  historyEntries     TierHistory[]
 
   @@unique([communityId, key])
   @@index([communityId])
@@ -68,11 +106,13 @@ model MemberTierStatus {
   id                    String   @id @default(cuid())
   memberId              String   // Reference to member in auth system
   communityId           String
+  community             Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
 
   currentTierId         String?  // null if no tier assigned
   currentTier           MembershipTier? @relation(fields: [currentTierId], references: [id])
 
   evaluatedAt           DateTime @default(now())
+  nextReEvaluationAt    DateTime? // When should this member be re-evaluated
 
   // Detailed evaluation results
   // Stores which rules passed/failed and why
@@ -85,4 +125,161 @@ model MemberTierStatus {
   @@index([communityId])
   @@index([currentTierId])
   @@index([memberId])
+  @@index([nextReEvaluationAt])
+}
+
+// Application for tier membership (manual approval flow)
+model MembershipApplication {
+  id                String   @id @default(cuid())
+  memberId          String
+  communityId       String
+  community         Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
+  targetTierId      String
+  targetTier        MembershipTier @relation(fields: [targetTierId], references: [id], onDelete: Cascade)
+
+  status            ApplicationStatus @default(pending)
+
+  // Application details
+  reason            String   @db.Text
+  metadata          Json?
+
+  // Review details
+  reviewedAt        DateTime?
+  reviewedBy        String?  // Member ID of reviewer
+  reviewNote        String?  @db.Text
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([memberId, communityId])
+  @@index([targetTierId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum ApplicationStatus {
+  pending
+  approved
+  rejected
+  withdrawn
+}
+
+// Benefits associated with a tier
+model TierBenefit {
+  id                String   @id @default(cuid())
+  tierId            String
+  tier              MembershipTier @relation(fields: [tierId], references: [id], onDelete: Cascade)
+
+  key               String   // Unique key within tier (e.g., "api_rate_limit")
+  name              String
+  description       String?  @db.Text
+  benefitType       BenefitType
+
+  // Benefit configuration
+  // For 'feature_flag': { "enabled": true }
+  // For 'quota': { "limit": 1000, "period": "monthly" }
+  // For 'perk': { "description": "Free merchandise" }
+  // For 'access': { "resources": ["premium-channels"] }
+  configJson        Json
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([tierId, key])
+  @@index([tierId])
+  @@index([benefitType])
+}
+
+enum BenefitType {
+  feature_flag
+  quota
+  perk
+  access
+}
+
+// Track member activities that influence tier evaluation
+model MemberActivity {
+  id                String   @id @default(cuid())
+  memberId          String
+  communityId       String
+  community         Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
+  activityType      String   // e.g., "post_created", "comment_added", "vote_cast"
+  points            Int?     // Optional points value
+  metadata          Json?
+
+  occurredAt        DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  @@index([memberId, communityId])
+  @@index([activityType])
+  @@index([occurredAt])
+}
+
+// Historical record of tier changes
+model TierHistory {
+  id                String   @id @default(cuid())
+  memberId          String
+  communityId       String
+
+  fromTierId        String?
+  fromTier          MembershipTier? @relation(fields: [fromTierId], references: [id], name: "fromTier")
+
+  toTierId          String?
+  toTier            MembershipTier? @relation(fields: [toTierId], references: [id], name: "toTier")
+
+  reason            String   @db.Text // Why the change happened
+  triggeredBy       String?  // Member ID or "system"
+  metadata          Json?    // Additional context
+
+  changedAt         DateTime @default(now())
+
+  @@index([memberId, communityId])
+  @@index([changedAt])
+}
+
+// Reusable tier templates
+model TierTemplate {
+  id                String   @id @default(cuid())
+  key               String   @unique
+  name              String
+  description       String?  @db.Text
+
+  // Template data (tiers + rules)
+  templateJson      Json
+
+  category          String?  // e.g., "gaming", "business", "community"
+  isPublic          Boolean  @default(false)
+
+  usageCount        Int      @default(0)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([category])
+  @@index([isPublic])
+}
+
+// Webhooks for external integrations
+model Webhook {
+  id                String   @id @default(cuid())
+  communityId       String
+  community         Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+
+  url               String
+  events            String[] // Array of event types to listen for
+  secret            String?  // Optional signing secret
+  active            Boolean  @default(true)
+
+  // Stats
+  lastTriggeredAt   DateTime?
+  successCount      Int      @default(0)
+  failureCount      Int      @default(0)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([communityId])
+  @@index([active])
 }
